@@ -40,6 +40,7 @@ import (
 	"golang.org/x/sync/singleflight"
 	"google.golang.org/grpc"
 	"google.golang.org/protobuf/types/known/durationpb"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 // URNMonitoringInfoShortID is a URN indicating support for short monitoring info IDs.
@@ -49,6 +50,7 @@ const URNMonitoringInfoShortID = "beam:protocol:monitoring_info_short_ids:v1"
 type Options struct {
 	RunnerCapabilities []string // URNs for what runners are able to understand over the FnAPI.
 	StatusEndpoint     string   // Endpoint for worker status reporting.
+	EnableDataSampling bool     // Enable data sampling feature
 }
 
 // Main is the main entrypoint for the Go harness. It runs at "runtime" -- not
@@ -156,6 +158,10 @@ func MainWithOptions(ctx context.Context, loggingEndpoint, controlEndpoint strin
 		cache:                &sideCache,
 		runnerCapabilities:   rcMap,
 	}
+	if opts.EnableDataSampling {
+		ctrl.dataSampler = exec.NewDataSampler()
+		go ctrl.dataSampler.Start()
+	}
 
 	// if the runner supports worker status api then expose SDK harness status
 	if opts.StatusEndpoint != "" {
@@ -181,6 +187,9 @@ func MainWithOptions(ctx context.Context, loggingEndpoint, controlEndpoint strin
 			atomic.AddInt32(&shutdown, 1)
 			close(respc)
 			wg.Wait()
+			if ctrl.dataSampler != nil {
+				ctrl.dataSampler.Stop()
+			}
 			if err == io.EOF {
 				return nil
 			}
@@ -296,8 +305,9 @@ type control struct {
 	// metric stores for active plans.
 	metStore map[instructionID]*metrics.Store // protected by mu
 	// plans that have failed during execution
-	failed map[instructionID]error // protected by mu
-	mu     sync.Mutex
+	failed      map[instructionID]error // protected by mu
+	dataSampler *exec.DataSampler
+	mu          sync.Mutex
 
 	data  *DataChannelManager
 	state *StateChannelManager
@@ -345,7 +355,8 @@ func (c *control) getOrCreatePlan(bdID bundleDescriptorID) (*exec.Plan, error) {
 		}
 		desc = newDesc.(*fnpb.ProcessBundleDescriptor)
 	}
-	newPlan, err := exec.UnmarshalPlan(desc)
+
+	newPlan, err := exec.UnmarshalPlan(desc, c.dataSampler)
 	if err != nil {
 		return nil, errors.WithContextf(err, "invalid bundle desc: %v\n%v\n", bdID, desc.String())
 	}
@@ -652,6 +663,33 @@ func (c *control) handleInstruction(ctx context.Context, req *fnpb.InstructionRe
 					// TODO(BEAM-11092): Populate with non-bundle metrics data.
 					MonitoringData: map[string][]byte{},
 				},
+			},
+		}
+	case req.GetSampleData() != nil:
+		msg := req.GetSampleData()
+		var samples = make(map[string]*fnpb.SampleDataResponse_ElementList)
+		var elementsMap map[string][]*exec.DataSample
+		if len(msg.PcollectionIds) > 0 {
+			elementsMap = c.dataSampler.GetSamplesForPCollections(msg.PcollectionIds)
+		} else {
+			elementsMap = c.dataSampler.GetAllSamples()
+		}
+		for pid, elements := range elementsMap {
+			var elementList fnpb.SampleDataResponse_ElementList
+			for i := range elements {
+				var sampledElement = &fnpb.SampledElement{
+					Element:         elements[i].Element,
+					SampleTimestamp: timestamppb.New(elements[i].Timestamp),
+				}
+				elementList.Elements = append(elementList.Elements, sampledElement)
+			}
+			samples[pid] = &elementList
+		}
+
+		return &fnpb.InstructionResponse{
+			InstructionId: string(instID),
+			Response: &fnpb.InstructionResponse_SampleData{
+				SampleData: &fnpb.SampleDataResponse{ElementSamples: samples},
 			},
 		}
 

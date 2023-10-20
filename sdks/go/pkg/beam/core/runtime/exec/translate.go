@@ -51,8 +51,8 @@ const (
 )
 
 // UnmarshalPlan converts a model bundle descriptor into an execution Plan.
-func UnmarshalPlan(desc *fnpb.ProcessBundleDescriptor) (*Plan, error) {
-	b, err := newBuilder(desc)
+func UnmarshalPlan(desc *fnpb.ProcessBundleDescriptor, dataSampler *DataSampler) (*Plan, error) {
+	b, err := newBuilder(desc, dataSampler)
 	if err != nil {
 		return nil, err
 	}
@@ -169,8 +169,9 @@ type builder struct {
 	nodes     map[string]*PCollection // PCollectionID -> Node (cache)
 	links     map[linkID]Node         // linkID -> Node (cache)
 
-	units []Unit // result
-	idgen *GenID
+	units       []Unit // result
+	idgen       *GenID
+	dataSampler *DataSampler
 }
 
 // linkID represents an incoming data link to an Node.
@@ -179,7 +180,7 @@ type linkID struct {
 	input int    // input index. If > 0, it's a side input.
 }
 
-func newBuilder(desc *fnpb.ProcessBundleDescriptor) (*builder, error) {
+func newBuilder(desc *fnpb.ProcessBundleDescriptor, dataSampler *DataSampler) (*builder, error) {
 	// Preprocess graph structure to allow insertion of Multiplex,
 	// Flatten and Discard.
 
@@ -216,7 +217,8 @@ func newBuilder(desc *fnpb.ProcessBundleDescriptor) (*builder, error) {
 		nodes:     make(map[string]*PCollection),
 		links:     make(map[linkID]Node),
 
-		idgen: &GenID{},
+		idgen:       &GenID{},
+		dataSampler: dataSampler,
 	}
 	return b, nil
 }
@@ -415,7 +417,7 @@ func (b *builder) newPCollectionNode(id string, out Node) (*PCollection, error) 
 	if err != nil {
 		return nil, err
 	}
-	u := &PCollection{UID: b.idgen.New(), Out: out, PColID: id, Coder: ec, Seed: rand.Int63()}
+	u := &PCollection{UID: b.idgen.New(), Out: out, PColID: id, Coder: ec, Seed: rand.Int63(), dataSampler: b.dataSampler}
 	b.nodes[id] = u
 	b.units = append(b.units, u)
 	return u, nil

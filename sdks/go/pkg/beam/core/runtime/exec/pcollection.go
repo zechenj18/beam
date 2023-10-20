@@ -16,12 +16,14 @@
 package exec
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"math"
 	"math/rand"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/apache/beam/sdks/v2/go/pkg/beam/core/graph/coder"
 )
@@ -45,6 +47,7 @@ type PCollection struct {
 	elementCount                         int64 // must use atomic operations.
 	sizeMu                               sync.Mutex
 	sizeCount, sizeSum, sizeMin, sizeMax int64
+	dataSampler                          *DataSampler
 }
 
 // ID returns the debug id for this unit.
@@ -95,6 +98,13 @@ func (p *PCollection) ProcessElement(ctx context.Context, elm *FullValue, values
 		}
 		var w byteCounter
 		p.elementCoder.Encode(elm, &w)
+
+		if p.dataSampler != nil {
+			var buf bytes.Buffer
+			p.elementCoder.Encode(elm, &buf)
+			p.dataSampler.SendSample(p.PColID, buf.Bytes(), time.Now())
+		}
+
 		p.addSize(int64(w.count))
 	}
 	return p.Out.ProcessElement(ctx, elm, values...)
